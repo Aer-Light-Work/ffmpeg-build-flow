@@ -1,0 +1,138 @@
+name: Build FFmpeg（三平台 × LGPL/GPL）
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - .gitignore
+  workflow_dispatch:
+    inputs:
+      ffmpeg_ref:
+        description: "FFmpeg git ref（tag 或分支）"
+        default: "n7.1"
+        required: false
+  schedule:
+    - cron: "0 4 * * 1"  # 每周一巡检依赖源是否腐烂
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ffmpeg-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: latest
+  FFMPEG_REPO: Aer-Light-Work/ffmpeg-build-flow
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      WORK: ${{ runner.temp }}/work
+      OUT: ${{ runner.temp }}/out
+      FFMPEG_SRC: ${{ runner.temp }}/ffmpeg-src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            nasm yasm pkg-config zip git make
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-lame
+            mingw-w64-x86_64-x264 mingw-w64-x86_64-x265
+            mingw-w64-x86_64-libvpx mingw-w64-x86_64-opus
+            mingw-w64-x86_64-libvorbis mingw-w64-x86_64-dav1d
+            mingw-w64-x86_64-zlib mingw-w64-x86_64-bzip2
+
+      - name: Build LGPL + GPL
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          export FFMPEG_REF="${FFMPEG_REF_INPUT}"
+          for v in lgpl gpl; do
+            echo "########## windows / $v ##########"
+            VARIANT="$v" bash scripts/build-ffmpeg-msys2.sh
+          done
+        env:
+          FFMPEG_REF_INPUT: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
+
+      - uses: ./.github/actions/publish
+        if: always()
+
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      WORK: ${{ runner.temp }}/work
+      OUT: ${{ runner.temp }}/out
+      FFMPEG_SRC: ${{ runner.temp }}/ffmpeg-src
+      PREFIX: ${{ runner.temp }}/deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            nasm yasm pkg-config autoconf automake libtool meson ninja-build \
+            cmake git build-essential xz-utils
+
+      - name: Build static dependencies（一次，两变体共用）
+        run: |
+          set -euo pipefail
+          VARIANT=gpl OS=linux WORK="$WORK/deps-src" bash scripts/build-deps.sh
+
+      - name: Build LGPL + GPL
+        run: |
+          set -euo pipefail
+          export FFMPEG_REF="${FFMPEG_REF_INPUT}"
+          for v in lgpl gpl; do
+            echo "########## linux / $v ##########"
+            VARIANT="$v" OS=linux bash scripts/build-ffmpeg.sh
+          done
+        env:
+          FFMPEG_REF_INPUT: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
+
+      - uses: ./.github/actions/publish
+        if: always()
+
+  build-macos:
+    runs-on: macos-latest  # arm64
+    timeout-minutes: 150
+    env:
+      WORK: ${{ runner.temp }}/work
+      OUT: ${{ runner.temp }}/out
+      FFMPEG_SRC: ${{ runner.temp }}/ffmpeg-src
+      PREFIX: ${{ runner.temp }}/deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          brew install nasm yasm pkg-config autoconf automake libtool \
+            meson ninja cmake git xz
+
+      - name: Build static dependencies（一次，两变体共用）
+        run: |
+          set -euo pipefail
+          VARIANT=gpl OS=macos WORK="$WORK/deps-src" bash scripts/build-deps.sh
+
+      - name: Build LGPL + GPL
+        run: |
+          set -euo pipefail
+          export FFMPEG_REF="${FFMPEG_REF_INPUT}"
+          for v in lgpl gpl; do
+            echo "########## macos-arm64 / $v ##########"
+            VARIANT="$v" OS=macos bash scripts/build-ffmpeg.sh
+          done
+        env:
+          FFMPEG_REF_INPUT: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
+
+      - uses: ./.github/actions/publish
+        if: always()

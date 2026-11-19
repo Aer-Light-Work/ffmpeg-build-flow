@@ -1,0 +1,10 @@
+ffmpeg-src/
+deps/
+deps-work/
+work/
+out/
+*.zip
+*.tar.xz
+*.tar.gz
+__pycache__/
+.venv/

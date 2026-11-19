@@ -1,0 +1,39 @@
+name: Publish to rolling release
+description: 把本 job 产出的压缩包上传到滚动 release（latest），同名资产覆盖。
+
+runs:
+  using: composite
+  steps:
+    - name: Upload artifacts（${{ runner.os }}）
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -uo pipefail
+        shopt -s nullglob
+        files=("$OUT"/ffmpeg-*.zip "$OUT"/ffmpeg-*.tar.xz)
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "::$error::没有产出任何压缩包（$OUT）"
+          exit 1
+        fi
+        printf '待上传：%s\n' "${files[@]##*/}"
+
+        notes="$RUNNER_TEMP/rolling-release-notes.md"
+        printf '%s\n' \
+          '由 `build-ffmpeg.yml` 自动维护的滚动发布：每次成功构建按固定文件名覆盖同名资产。' \
+          '' \
+          '消费侧使用不带版本号的直链，例如' \
+          '`https://github.com/Aer-Light-Work/ffmpeg-build-flow/releases/download/latest/ffmpeg-win64-lgpl-shared.zip`。' \
+          '' \
+          '包内布局统一为：单一顶层目录 `ffmpeg-<ref>-<platform>-<variant>[-shared]/`，' \
+          '其下有 `bin/`（可执行文件与全部运行时库）、`LICENSE.txt`、`README-build.txt`。' \
+          '具体 ref / commit / configure 参数见 `README-build.txt` 与 `ffmpeg -version` 输出。' \
+          > "$notes"
+
+        gh release view "$RELEASE_TAG" --repo "$FFMPEG_REPO" >/dev/null 2>&1 || \
+          gh release create "$RELEASE_TAG" --repo "$FFMPEG_REPO" --target "$GITHUB_SHA" \
+            --prerelease --title "FFmpeg 滚动构建（latest）" --notes-file "$notes"
+
+        gh release upload "$RELEASE_TAG" "${files[@]}" \
+          --repo "$FFMPEG_REPO" --clobber
+        echo "已更新 https://github.com/$FFMPEG_REPO/releases/tag/$RELEASE_TAG"
