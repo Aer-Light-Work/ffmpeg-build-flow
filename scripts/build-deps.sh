@@ -223,8 +223,28 @@ main() {
     "build_$d"
   done
 
+  # 收尾核验。注意不能直接 ls "$PREFIX/lib/pkgconfig"：lame 只装 libmp3lame.a 与头文件、
+  # 不提供 .pc，于是纯 LGPL 变体（只编 lame）的 pkgconfig 目录压根不存在，ls 返回 2，
+  # set -e 会在所有依赖都编好之后把步骤杀掉 —— 验证语句本身在成功路径上失败。
+  local missing="" n
+  for n in "${deps[@]}"; do
+    case "$n" in
+      lame)     [ -f "$PREFIX/lib/libmp3lame.a" ] || missing="$missing libmp3lame.a" ;;
+      x264)     [ -f "$PREFIX/lib/libx264.a" ]    || missing="$missing libx264.a" ;;
+      x265)     [ -f "$PREFIX/lib/libx265.a" ]    || missing="$missing libx265.a" ;;
+      libvpx)   [ -f "$PREFIX/lib/libvpx.a" ]     || missing="$missing libvpx.a" ;;
+      opus)     [ -f "$PREFIX/lib/libopus.a" ]    || missing="$missing libopus.a" ;;
+      ogg)      [ -f "$PREFIX/lib/libogg.a" ]     || missing="$missing libogg.a" ;;
+      vorbis)   [ -f "$PREFIX/lib/libvorbis.a" ]  || missing="$missing libvorbis.a" ;;
+      dav1d)    [ -f "$PREFIX/lib/libdav1d.a" ]   || missing="$missing libdav1d.a" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    deps_die "依赖产物缺失：$missing"
+  fi
   echo "依赖就绪：${PREFIX}"
-  ls "$PREFIX/lib/pkgconfig"
+  echo "  静态库：$(ls "$PREFIX"/lib/*.a 2>/dev/null | wc -l) 个"
+  echo "  .pc：$( { ls "$PREFIX"/lib/pkgconfig/*.pc "$PREFIX"/lib64/pkgconfig/*.pc 2>/dev/null || true; } | wc -l) 个（lame 不提供 .pc，少一个是正常的）"
 }
 
 # 仅在被直接执行时跑 main；被 source 时只暴露函数。

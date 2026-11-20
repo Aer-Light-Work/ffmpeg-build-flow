@@ -57,6 +57,14 @@ if [ "$VARIANT" = gpl ]; then
     --enable-gpl --enable-version3
     --enable-libx264 --enable-libx265
     --enable-libvpx --enable-libopus --enable-libvorbis --enable-libdav1d
+    # 自建的 x265 只有静态库（ENABLE_SHARED=0），它的 x265.pc 里
+    #   Libs.private: -lstdc++ -lgcc_s -lgcc -liconv ...
+    # 不加 --static 时 pkg-config 只给 -lx265，把这些私有依赖漏掉，把 libx265.a 链进
+    # avcodec-61.dll 时会留下未定义符号。用 --static 是为了让 .pc 自己声明清单，
+    # 而不是我在这里硬抄一遍（硬抄会随 x265 版本漂移）。
+    # 只加在 GPL 分支：LGPL 唯一的依赖是 MSYS2 的共享 lame，它根本不走 pkg-config，
+    # 且上一轮 LGPL 已在无此参数的情况下构建成功，不必扰动。
+    --pkg-config-flags=--static
   )
 fi
 

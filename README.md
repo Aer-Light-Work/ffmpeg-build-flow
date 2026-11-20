@@ -1,6 +1,6 @@
 # ffmpeg-build-flow
 
-自动构建 FFmpeg 可执行文件的仓库：三个平台各一个 job，每个 job 同时产出 **LGPL** 与 **GPL** 两套构建，
+自动构建 FFmpeg 可执行文件的仓库：按 **平台 × 变体** 组成 6 个 job（三平台各有 LGPL 与 GPL 一份），
 结果发布到本仓库的滚动 Release（`latest`）。
 
 本仓库须保持 **public** —— 消费侧用匿名直链下载资产，不走 token。
@@ -49,15 +49,20 @@ Windows 产出共享库（DLL）形式，并把全部运行时 DLL 收进 `bin/`
 - 手动 `workflow_dispatch`，可指定 `ffmpeg_ref`（默认 `n7.1`）
 - 每周一 04:00 UTC 定时跑一次，用于发现依赖下载源腐烂
 
-三个 job 相互独立，可单独重跑；每个 job 只覆盖自己那两个资产。
-即使某个变体构建失败，已产出的压缩包仍会上传。
+6 个 job 相互独立（`fail-fast: false`），可单独重跑，每个只覆盖自己那一个资产。
+
+拆到变体粒度而不是「一个平台 job 内串行跑两变体」，是因为 GPL 的依赖链明显更长更脆
+（要额外引导 CMake 3.x、要静态编六个库）：把它们绑在一个 job 里时，GPL 依赖一挂，
+几分钟就能出来的 LGPL 产物也被连带拖死。分开后 LGPL 只编 lame 一个依赖。
+
+即使构建失败，已产出的压缩包仍会上传（publish 步骤是 `if: always()`）。
 
 ## 目录结构
 
 ```
-.github/workflows/build-ffmpeg.yml   三个平台 job（只负责装工具链）
+.github/workflows/build-ffmpeg.yml   平台 × 变体矩阵（6 个 job，只负责装工具链）
 .github/actions/publish/             滚动 release 上传（composite action）
-scripts/build-deps.sh                Linux/macOS 外部依赖静态编译
+scripts/build-deps.sh                外部依赖静态编译；Windows 也 source 它复用 build_x265
 scripts/build-ffmpeg.sh              Linux/macOS 构建 + 自检 + 打包
 scripts/build-ffmpeg-msys2.sh        Windows(MSYS2) 构建 + DLL 收集 + 自检 + 打包
 scripts/finalize.sh                  共用：源码获取、合规自检、许可证与溯源文件、打包
@@ -75,13 +80,21 @@ Linux / macOS：
 
 ```bash
 export FFMPEG_REF=n7.1 FFMPEG_SRC=$PWD/ffmpeg-src PREFIX=$PWD/deps OUT=$PWD/out WORK=$PWD/work
-VARIANT=gpl OS=linux bash scripts/build-deps.sh      # 一次即可，两变体共用
+VARIANT=gpl OS=linux bash scripts/build-deps.sh      # GPL 需要先编依赖
 VARIANT=lgpl OS=linux bash scripts/build-ffmpeg.sh
 ```
 
-macOS 把 `OS=linux` 换成 `OS=macos`。
+macOS 把 `OS=linux` 换成 `OS=macos`。LGPL 只需 `VARIANT=lgpl bash scripts/build-deps.sh`
+（只编 lame）。`build-deps.sh` 会按需自行引导 CMake 3.x 到 `$WORK/cmake3`，不必手工安装。
 
 ## 已知维护成本
 
 `scripts/build-deps.sh` 里的依赖版本是钉死的，上游 tarball 链接会随时间腐烂。
-每个依赖都配了备用源，且每周一定时构建会把失效暴露出来。
+多数依赖配了备用源，但 **x265 是单源**（bitbucket）：备用镜像 `videolan/x265` 没有任何
+`Release_*` tag，写了也回落不了，所以宁可留单源、让失败明确暴露。
+
+x265 的版本尤其不能随手升：它钉在 `Release_4.0` 是因为 FFmpeg n7.1 的 libx265 wrapper
+按 `X265_BUILD >= 210` 选择 `encoder_encode` 的参数类型，而 x265 4.1 又把该参数改了回去。
+升级 FFmpeg ref 时必须重新比对这张表。
+
+每周一定时构建会把上述失效暴露出来。

@@ -38,6 +38,13 @@ ARGS=(
   --disable-doc --disable-ffplay --disable-autodetect
   --pkg-config-flags=--static
   --enable-libmp3lame
+  # lame 不提供 .pc —— FFmpeg 的 configure 用
+  #   require "libmp3lame >= 3.98.3" lame/lame.h lame_set_VBR_quality -lmp3lame
+  # 这种纯头文件+库路径的方式探测它，完全不经过 pkg-config。依赖装在独立 $PREFIX 里，
+  # 不在编译器默认搜索路径上，所以必须显式给 -I/-L，否则 configure 会报找不到 libmp3lame
+  # （即便 PKG_CONFIG_PATH 已经指对）。其余依赖有 .pc，这两项对它们无害。
+  --extra-cflags="-I$PREFIX/include"
+  --extra-ldflags="-L$PREFIX/lib"
 )
 if [ "$VARIANT" = gpl ]; then
   ARGS+=(
