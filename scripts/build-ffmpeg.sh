@@ -26,7 +26,8 @@ esac
 
 ensure_src
 
-JOBS="$( (nproc || sysctl -n hw.ncpu) 2>/dev/null | head -1 )"
+JOBS="$( { nproc || sysctl -n hw.ncpu; } 2>/dev/null | head -1 )"
+JOBS="${JOBS:-2}"
 TOP="$WORK/install/ffmpeg-${FFMPEG_REF}-${PLATFORM}-${VARIANT}"
 BUILD="$WORK/build-${PLATFORM}-${VARIANT}"
 rm -rf "$TOP" "$BUILD"; mkdir -p "$TOP" "$BUILD" "$OUT"
@@ -64,7 +65,7 @@ else
 fi
 export DEPS_NOTE
 
-echo "=== configure（$PLATFORM / $VARIANT）==="
+echo "=== configure（${PLATFORM} / ${VARIANT}）==="
 ( cd "$BUILD" && "$FFMPEG_SRC/configure" "${ARGS[@]}" ) || {
   echo "===== configure 失败，尾部 config.log =====" >&2
   grep -i -B3 -A15 'error\|cannot\|not found' "$BUILD/ffbuild/config.log" >&2 | tail -80 || true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 FFmpeg 的外部依赖从源码静态安装进独立 PREFIX（Linux / macOS）。
+# 把 FFmpeg 的外部依赖从源码静态安装进独立 PREFIX（Linux / macOS 全流程；Windows 只借用 x265）。
 #
 # 为什么要自己静态编：发行版与 Homebrew 的 x264/x265/libvpx/opus/vorbis 基本只发
 # .so/.dylib，直接链上去会得到依赖系统库的“假静态”二进制 —— 下游把二进制分发到
@@ -7,19 +7,14 @@
 #
 # 用法：PREFIX=<abs> VARIANT=lgpl|gpl OS=linux|macos [WORK=<abs>] bash scripts/build-deps.sh
 # 产出：$PREFIX/{lib,include,lib/pkgconfig}
+#
+# 本文件也可被 source：Windows 脚本只借用其中的 build_x265 / ensure_cmake3 / fetch / unpack，
+# 因此强制校验与主循环都收在 main 里，source 时不产生副作用。
 set -euo pipefail
 
-: "${PREFIX:?需要 PREFIX}"
-: "${VARIANT:?需要 VARIANT}"
-: "${OS:=linux}"
-WORK="${WORK:-$PWD/deps-work}"
-
-mkdir -p "$PREFIX" "$WORK"
-export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
-export CFLAGS="-O2 -fPIC ${CFLAGS:-}"
-export CXXFLAGS="-O2 -fPIC ${CXXFLAGS:-}"
-
-JOBS="$( (nproc || sysctl -n hw.ncpu) 2>/dev/null | head -1 )"
+# 不叫 die：本文件会被 Windows 脚本 source，而 finalize.sh 已有 die（语义是 exit 1）。
+# 同名会覆盖它，把自检的致命错误降级成 return。
+deps_die() { echo "build-deps: $*" >&2; return 1; }
 
 fetch() { # fetch <dest> <url...>
   local dest="$1"; shift
@@ -40,6 +35,105 @@ unpack() { # unpack <name> <dest> <url...> -> 把解压后的目录路径写到 
   rm -rf "$dest"; mkdir -p "$dest"
   tar -xf "$arc" -C "$dest" --strip-components=1
   printf '%s\n' "$dest"
+}
+
+# x265 的 CMakeLists 设置了 CMP0025/CMP0054 的 OLD 策略，CMake 4 已彻底移除该能力
+# （runner 上的 cmake 是 4.4.5，MSYS2 的是 4.5.0，实测都报
+#  “Policy CMP0025 may not be set to OLD behavior”）。这里取一份官方 CMake 3.31 二进制
+# 放进临时目录并前置到 PATH，只影响本进程，不改 runner 全局。
+CMAKE3_VER="3.31.6"
+
+ensure_cmake3() {
+  local plat
+  case "${OS:-linux}" in
+    linux)        plat=linux-x86_64 ;;
+    macos)        plat=macos-universal ;;
+    windows|msys) plat=windows-x86_64 ;;
+    *) deps_die "ensure_cmake3: 不支持的 OS ${OS:-}" ;;
+  esac
+  local dest="${WORK:?ensure_cmake3 需要 WORK}/cmake3"
+  local cached
+  # 目录尚不存在时 find 返回 1，叠加 pipefail 会让这条赋值触发 set -e 退出，故显式吞掉。
+  cached="$( { find "$dest" -maxdepth 3 -type f \( -name cmake -o -name cmake.exe \) -print 2>/dev/null || true; } | head -1)"
+  if [ -n "$cached" ]; then
+    export PATH="$(dirname "$cached"):$PATH"
+    echo "复用已引导的 cmake -> $(cmake --version | head -1)"
+    return 0
+  fi
+  mkdir -p "$dest"
+  local base="https://github.com/Kitware/CMake/releases/download/v${CMAKE3_VER}/cmake-${CMAKE3_VER}-${plat}"
+  case "$plat" in
+    windows-x86_64)
+      fetch "$dest/cmake.zip" "$base.zip" || return 1
+      # MSYS2 的 zip 包不提供 unzip，因此优先用 runner 自带的 tar（它能读 zip）。
+      if command -v unzip >/dev/null 2>&1; then unzip -q "$dest/cmake.zip" -d "$dest"
+      else tar -xf "$dest/cmake.zip" -C "$dest" --strip-components=1
+      fi ;;
+    *)
+      fetch "$dest/cmake.tar.gz" "$base.tar.gz" || return 1
+      tar -xf "$dest/cmake.tar.gz" -C "$dest" --strip-components=1 ;;
+  esac
+  rm -f "$dest"/cmake.*
+  # 各平台归档层级不同（Windows 是 bin/cmake.exe），搜出可执行文件再取其目录。
+  local b; b="$( { find "$dest" -maxdepth 3 -type f \( -name cmake -o -name cmake.exe \) -print 2>/dev/null || true; } | head -1)"
+  [ -n "$b" ] || deps_die "ensure_cmake3: 解压后找不到 cmake 可执行文件（$(ls "$dest")）"
+  export PATH="$(dirname "$b"):$PATH"
+  local v; v="$(cmake --version | head -1)"
+  echo "已引导 cmake：$v"
+  case "$v" in
+    "cmake version 3."*) ;;
+    *) deps_die "ensure_cmake3: 拿到的不是 3.x（${v}）" ;;
+  esac
+}
+
+# x265 必须钉在 Release_4.0（X265_BUILD 212）。FFmpeg n7.1 的 libx265.c 用
+# `#if X265_BUILD >= 210` 选择 encoder_encode 的第 5 参类型，而 x265 的类型来回改过：
+#   3.5 → BUILD 200, x265_picture *   （走 #else 分支）
+#   4.0 → BUILD 212, x265_picture **  （走 >= 210 分支，匹配）
+#   4.1 → BUILD 215, x265_picture *   （仍走 >= 210 分支 → 类型不符）
+# MSYS2 当前发 4.3，Windows 实测报 “expected 'x265_picture *' but argument is of type
+# 'x265_picture **'”。三平台统一 4.0，产物才可比对。
+X265_REF="Release_4.0"
+
+build_x265() {
+  local os="${1:-${OS:-linux}}"
+  rm -rf "$WORK/x265"
+  # 单源：videolan/x265 镜像没有任何 Release_* tag（已用 git ls-remote 核实），
+  # 而 bitbucket 在 runner 上实测可达（上一轮正是克隆成功之后才报的 cmake 错）。
+  git clone --depth 1 --branch "$X265_REF" https://bitbucket.org/multicoreware/x265_git.git "$WORK/x265" \
+    || deps_die "build_x265: 克隆 $X265_REF 失败"
+
+  # 浅克隆不带 tag，Version.cmake 的 `git describe --abbrev=0 --tags` 于是返回空，
+  # X265_LATEST_TAG 为空 → CMakeLists 里 string(REGEX MATCHALL ...) 得到空列表 →
+  # “list GET given empty list” 直接 configure 失败。该分支被 if(CMAKE_RC_COMPILER)
+  # 包着，所以只有装了 windres 的 Windows 会中招（Linux/macOS 跳过），本地已复现：
+  # 打一个与所构建 ref 一致的轻量 tag 后 configure 完整通过。
+  local tag="${X265_REF#Release_}"
+  git -C "$WORK/x265" tag -f "$tag" HEAD
+  echo "x265 版本标记：$(git -C "$WORK/x265" describe --abbrev=0 --tags)"
+
+  ensure_cmake3
+  # 只使用已在 $X265_REF 的 source/CMakeLists.txt 里核实存在的变量：
+  # ENABLE_SHARED / ENABLE_PIC / ENABLE_CLI / EXTRA_LIB / EXTRA_LINK_FLAGS。
+  # 注意 3.x/4.x 都没有 ENABLE_STATIC —— x265-static 是无条件 add_library + install 的。
+  local -a args=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$PREFIX"
+    -DENABLE_SHARED=0
+    -DENABLE_PIC=1
+    -DENABLE_CLI=0
+    -DEXTRA_LINK_FLAGS=
+  )
+  case "$os" in
+    linux)        args+=(-DEXTRA_LIB=dl) ;;
+    windows|msys) args+=(-G "MSYS Makefiles") ;;
+  esac
+  ( cd "$WORK/x265/source"
+    cmake . "${args[@]}"
+    make -j"${JOBS:-1}"
+    make install
+  )
+  ls "$PREFIX/lib/"*x265* "$PREFIX/lib/pkgconfig/x265.pc"
 }
 
 autotools_static() { # autotools_static <dir> [额外 configure 参数...]
@@ -67,23 +161,6 @@ build_x264() {
   ( cd "$WORK/x264"
     ./configure --prefix="$PREFIX" --disable-shared --enable-static --disable-cli \
       --extra-cflags="-fPIC"
-    make -j"$JOBS"
-    make install
-  )
-}
-
-build_x265() {
-  rm -rf "$WORK/x265"
-  if ! git clone --depth 1 --branch Release_3.5 https://bitbucket.org/multicoreware/x265_git.git "$WORK/x265"; then
-    echo "build-deps: x265 克隆失败（bitbucket 不可达）" >&2
-    return 1
-  fi
-  local extra=""
-  [ "$OS" = linux ] && extra="-DEXTRA_LIB=dl"
-  ( cd "$WORK/x265/source"
-    cmake . -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DENABLE_SHARED=0 -DENABLE_STATIC=1 -DENABLE_PIC=1 \
-      -DENABLE_CLI=0 -DEXTRA_LINK_FLAGS="" $extra
     make -j"$JOBS"
     make install
   )
@@ -118,16 +195,39 @@ build_dav1d() {
   )
 }
 
-case "$VARIANT" in
-  lgpl) DEPS=(lame) ;;
-  gpl)  DEPS=(lame ogg vorbis x264 x265 libvpx opus dav1d) ;;
-  *) echo "build-deps: 未知变体 $VARIANT" >&2; exit 1 ;;
-esac
+main() {
+  : "${PREFIX:?需要 PREFIX}"
+  : "${VARIANT:?需要 VARIANT}"
+  OS="${OS:-linux}"
+  WORK="${WORK:-$PWD/deps-work}"
 
-for d in "${DEPS[@]}"; do
-  echo "=== 构建依赖：$d（$VARIANT / $OS）==="
-  "build_$d"
-done
+  mkdir -p "$PREFIX" "$WORK"
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export CFLAGS="-O2 -fPIC ${CFLAGS:-}"
+  export CXXFLAGS="-O2 -fPIC ${CXXFLAGS:-}"
+  JOBS="$( { nproc || sysctl -n hw.ncpu; } 2>/dev/null | head -1 )"
+  JOBS="${JOBS:-2}"
 
-echo "依赖就绪：$PREFIX"
-ls "$PREFIX/lib/pkgconfig"
+  local -a deps
+  # x265 排第二：它是唯一在 configure 阶段就可能失败的依赖（要额外引导 CMake 3.x），
+  # 让它早死，省掉后面几个依赖的无效编译时间。
+  case "$VARIANT" in
+    lgpl) deps=(lame) ;;
+    gpl)  deps=(lame x265 ogg vorbis x264 libvpx opus dav1d) ;;
+    *) deps_die "未知变体 ${VARIANT}" ;;
+  esac
+
+  local d
+  for d in "${deps[@]}"; do
+    echo "=== 构建依赖：${d}（${VARIANT} / ${OS}）==="
+    "build_$d"
+  done
+
+  echo "依赖就绪：${PREFIX}"
+  ls "$PREFIX/lib/pkgconfig"
+}
+
+# 仅在被直接执行时跑 main；被 source 时只暴露函数。
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi

@@ -12,14 +12,32 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/finalize.sh
 . "$HERE/finalize.sh"
+# shellcheck source=scripts/build-deps.sh
+. "$HERE/build-deps.sh"   # 只借用 build_x265 / ensure_cmake3 / fetch / unpack
 
 : "${FFMPEG_REF:?需要 FFMPEG_REF}"
 : "${VARIANT:?需要 VARIANT}"
 : "${FFMPEG_SRC:?需要 FFMPEG_SRC}"
 : "${OUT:?需要 OUT}"
 WORK="${WORK:-$PWD/work}"
+OS=windows
+PREFIX="${PREFIX:-$WORK/deps-x265}"
 PLATFORM="win64"
-[ "$VARIANT" = lgpl ] || [ "$VARIANT" = gpl ] || die "不支持的变体：$VARIANT"
+[ "$VARIANT" = lgpl ] || [ "$VARIANT" = gpl ] || die "不支持的变体：${VARIANT}"
+
+# x265 不能用 MSYS2 的包：它是 4.3，而 FFmpeg n7.1 的 libx265.c 按 3.x 的
+# encoder_encode 签名写（实测多出一个 x265_picture ** 参数而编译失败）。
+# 其余依赖（lame/x264/libvpx/opus/vorbis/dav1d）与 n7.1 相容，继续用 MSYS2 包。
+if [ "$VARIANT" = gpl ]; then
+  if [ -f "$PREFIX/lib/libx265.a" ]; then
+    echo "复用已构建的 x265：$PREFIX"
+  else
+    mkdir -p "$PREFIX"
+    JOBS="$(nproc 2>/dev/null || echo 4)"
+    build_x265 windows
+  fi
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
 
 ensure_src
 
@@ -45,13 +63,13 @@ fi
 CONFIGURE_ARGS="${ARGS[*]}"
 export CONFIGURE_ARGS
 if [ "$VARIANT" = gpl ]; then
-  DEPS_NOTE="MSYS2 mingw-w64-x86_64: lame x264 x265 libvpx opus libvorbis dav1d zlib bzip2（共享 DLL，已全部收进 bin/）"
+  DEPS_NOTE="MSYS2 mingw-w64-x86_64: lame x264 libvpx opus libvorbis dav1d zlib bzip2（共享 DLL，已全部收进 bin/）+ x265 Release_4.0 自建静态库（MSYS2 的 4.3 与 FFmpeg n7.1 的 encoder_encode 签名不兼容）"
 else
   DEPS_NOTE="MSYS2 mingw-w64-x86_64: lame（共享 DLL，运行时依赖已全部收进 bin/）"
 fi
 export DEPS_NOTE
 
-echo "=== configure（$PLATFORM / $VARIANT）==="
+echo "=== configure（${PLATFORM} / ${VARIANT}）==="
 ( cd "$BUILD" && "$FFMPEG_SRC/configure" "${ARGS[@]}" ) || {
   echo "===== configure 失败，尾部 config.log =====" >&2
   tail -80 "$BUILD/ffbuild/config.log" >&2 || true
@@ -61,13 +79,30 @@ echo "=== configure（$PLATFORM / $VARIANT）==="
 ( cd "$BUILD" && make -j"$JOBS" && make install )
 
 echo "=== 收集运行时 DLL ==="
-mapfile -t extra < <(
-  ldd "$TOP/bin/ffmpeg.exe" "$TOP/bin/ffprobe.exe" 2>/dev/null \
-    | grep -oE '/mingw64/bin/[^ ]+\.dll' | sort -u
-)
-for d in "${extra[@]}"; do
-  cp -v "$d" "$TOP/bin/"
-done
+# 必须扫 bin/ 下的全部文件而不只是两个 .exe：--enable-shared 下 ffmpeg.exe 只直接依赖
+# 我们自己的 av*.dll / sw*.dll，真正的第三方库（libmp3lame、libx264、zlib…）挂在那些
+# DLL 上，只看 .exe 会漏掉它们。
+# 枚举 bin/ 下所有 PE 文件引用的 /mingw64 DLL。整条管道的退出状态一律归零：
+# grep 无匹配返回 1、xargs 在某个 ldd 失败时返回 123，而调用处是赋值语句，pipefail
+# 会把非零状态透传给 set -e —— 但"无匹配"恰恰是闭合断言的成功路径。调用方只依据
+# 输出为空/非空来判断，不依赖退出码。
+collect_dlls() {
+  { find "$TOP/bin" -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dll' \) -print0 \
+    | xargs -0 ldd 2>/dev/null \
+    | { grep -oE '/mingw64/bin/[^ ]+\.dll' || true; } | sort -u; } || true
+}
+for d in $(collect_dlls); do cp -v "$d" "$TOP/bin/"; done
+
+# 闭合断言：selfcheck 是在 MSYS2 里跑的，此时 /mingw64/bin 仍在 PATH 上，就算包里缺 DLL
+# 也照样能启动 —— 自检通过并不证明包自洽。收集完再扫一遍，要求不再出现任何 /mingw64/bin
+# 引用；残留即意味着该 DLL 没被收进 bin/，用户机器上会直接加载失败。
+leftover="$(collect_dlls)"
+if [ -n "$leftover" ]; then
+  echo "===== 打包不自洽：以下 DLL 仍未收进 bin/ =====" >&2
+  printf '%s\n' "$leftover" >&2
+  exit 1
+fi
+echo "DLL 集合已闭合（无 /mingw64/bin 残留引用）"
 
 selfcheck_ffmpeg "$TOP" "$VARIANT"
 

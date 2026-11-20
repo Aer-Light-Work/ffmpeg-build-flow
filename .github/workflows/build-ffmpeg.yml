@@ -27,30 +27,72 @@ env:
   RELEASE_TAG: latest
   FFMPEG_REPO: Aer-Light-Work/ffmpeg-build-flow
 
-# 注意：路径不在 job 级 env 里拼 ${{ runner.temp }} —— runner context 只允许出现在
-# step 级。各步骤直接从导出的 RUNNER_TEMP 环境变量取，publish action 用同一约定。
+# 路径不在 job 级 env 里拼 ${{ runner.temp }} —— runner context 只允许出现在 step 级。
+# 各步骤从 shell 本就导出的 RUNNER_TEMP 取路径，publish action 用同一约定。
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    timeout-minutes: 120
+  # 平台 × 变体 = 6 个 job。不合并成 3 个平台 job 的原因：上一轮 Linux 先把全部 GPL 依赖
+  # 编完才轮到 ffmpeg，x265 一挂连 LGPL 的机会都没有。拆开以后 LGPL 只编 lame、几分钟
+  # 出结果，GPL 的依赖链再长也不会拖累它。
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, variant: lgpl }
+          - { os: windows-latest, variant: gpl }
+          - { os: ubuntu-latest,  variant: lgpl }
+          - { os: ubuntu-latest,  variant: gpl }
+          - { os: macos-latest,   variant: lgpl }   # macos-latest 即 arm64
+          - { os: macos-latest,   variant: gpl }
     steps:
       - uses: actions/checkout@v4
 
       - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
         with:
           msystem: MINGW64
           update: true
+          # 故意不装 mingw-w64-x86_64-x265：它是 4.3，与 FFmpeg n7.1 的 libx265 wrapper
+          # 的 encoder_encode 签名不兼容；x265 由 scripts/build-deps.sh 自建 Release_4.0。
+          # zip 用于打包，unzip/tar/curl 供 ensure_cmake3 取 CMake 归档。
           install: >-
-            nasm yasm pkg-config zip git make
+            nasm yasm pkg-config zip unzip curl git make
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-lame
-            mingw-w64-x86_64-x264 mingw-w64-x86_64-x265
+            mingw-w64-x86_64-x264
             mingw-w64-x86_64-libvpx mingw-w64-x86_64-opus
             mingw-w64-x86_64-libvorbis mingw-w64-x86_64-dav1d
             mingw-w64-x86_64-zlib mingw-w64-x86_64-bzip2
 
-      - name: Build LGPL + GPL
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            nasm yasm pkg-config autoconf automake libtool meson ninja-build \
+            cmake git build-essential xz-utils
+
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install nasm yasm pkg-config autoconf automake libtool \
+            meson ninja cmake git xz
+
+      # Linux/macOS：静态依赖装进独立 PREFIX。LGPL job 只会取 lame，GPL job 才走完整链。
+      - name: Build static dependencies
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          export WORK="$RUNNER_TEMP/work/deps-src" PREFIX="$RUNNER_TEMP/deps"
+          mkdir -p "$WORK" "$PREFIX"
+          VARIANT="${{ matrix.variant }}" OS="$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')" \
+            bash scripts/build-deps.sh
+
+      - name: Build FFmpeg (Windows)
+        if: runner.os == 'Windows'
         shell: msys2 {0}
         env:
           FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
@@ -58,35 +100,10 @@ jobs:
           set -euo pipefail
           export WORK="$RUNNER_TEMP/work" OUT="$RUNNER_TEMP/out" FFMPEG_SRC="$RUNNER_TEMP/ffmpeg-src"
           mkdir -p "$WORK" "$OUT"
-          for v in lgpl gpl; do
-            echo "########## windows / $v ##########"
-            VARIANT="$v" bash scripts/build-ffmpeg-msys2.sh
-          done
+          VARIANT="${{ matrix.variant }}" bash scripts/build-ffmpeg-msys2.sh
 
-      - uses: ./.github/actions/publish
-        if: always()
-
-  build-linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            nasm yasm pkg-config autoconf automake libtool meson ninja-build \
-            cmake git build-essential xz-utils
-
-      - name: Build static dependencies（一次，两变体共用）
-        run: |
-          set -euo pipefail
-          export WORK="$RUNNER_TEMP/work/deps-src" PREFIX="$RUNNER_TEMP/deps"
-          mkdir -p "$WORK" "$PREFIX"
-          VARIANT=gpl OS=linux bash scripts/build-deps.sh
-
-      - name: Build LGPL + GPL
+      - name: Build FFmpeg (Linux/macOS)
+        if: runner.os != 'Windows'
         env:
           FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
         run: |
@@ -94,44 +111,9 @@ jobs:
           export WORK="$RUNNER_TEMP/work" OUT="$RUNNER_TEMP/out" \
                  FFMPEG_SRC="$RUNNER_TEMP/ffmpeg-src" PREFIX="$RUNNER_TEMP/deps"
           mkdir -p "$WORK" "$OUT"
-          for v in lgpl gpl; do
-            echo "########## linux / $v ##########"
-            VARIANT="$v" OS=linux bash scripts/build-ffmpeg.sh
-          done
-
-      - uses: ./.github/actions/publish
-        if: always()
-
-  build-macos:
-    runs-on: macos-latest  # arm64
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        run: |
-          brew install nasm yasm pkg-config autoconf automake libtool \
-            meson ninja cmake git xz
-
-      - name: Build static dependencies（一次，两变体共用）
-        run: |
-          set -euo pipefail
-          export WORK="$RUNNER_TEMP/work/deps-src" PREFIX="$RUNNER_TEMP/deps"
-          mkdir -p "$WORK" "$PREFIX"
-          VARIANT=gpl OS=macos bash scripts/build-deps.sh
-
-      - name: Build LGPL + GPL
-        env:
-          FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
-        run: |
-          set -euo pipefail
-          export WORK="$RUNNER_TEMP/work" OUT="$RUNNER_TEMP/out" \
-                 FFMPEG_SRC="$RUNNER_TEMP/ffmpeg-src" PREFIX="$RUNNER_TEMP/deps"
-          mkdir -p "$WORK" "$OUT"
-          for v in lgpl gpl; do
-            echo "########## macos-arm64 / $v ##########"
-            VARIANT="$v" OS=macos bash scripts/build-ffmpeg.sh
-          done
+          VARIANT="${{ matrix.variant }}" \
+            OS="$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')" \
+            bash scripts/build-ffmpeg.sh
 
       - uses: ./.github/actions/publish
         if: always()

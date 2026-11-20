@@ -64,7 +64,7 @@ selfcheck_ffmpeg() {
       has "$c" || die "自检失败：GPL 产物缺少编码器 $c"
     done
   fi
-  echo "自检通过（$variant）"
+  echo "自检通过（${variant}）"
 }
 
 package() {
