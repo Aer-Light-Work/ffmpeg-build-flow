@@ -10,15 +10,27 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -uo pipefail
+        # 与各构建步骤同一约定：路径不从 YAML env 传，直接取导出的 RUNNER_TEMP
+        OUT="${OUT:-$RUNNER_TEMP/out}"
+
+        # gh 是 Windows 可执行文件，喂给它的路径需要先转成 Win32 形式
+        topath() {
+          if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+        }
+
         shopt -s nullglob
-        files=("$OUT"/ffmpeg-*.zip "$OUT"/ffmpeg-*.tar.xz)
-        if [ ${#files[@]} -eq 0 ]; then
-          echo "::$error::没有产出任何压缩包（$OUT）"
+        raw=()
+        for f in "$OUT"/ffmpeg-*.zip "$OUT"/ffmpeg-*.tar.xz; do raw+=("$f"); done
+        if [ ${#raw[@]} -eq 0 ]; then
+          echo "::$error::$OUT 下没有任何压缩包"
+          ls -la "$OUT" 2>&1 || true
           exit 1
         fi
-        printf '待上传：%s\n' "${files[@]##*/}"
+        files=()
+        for f in "${raw[@]}"; do files+=("$(topath "$f")"); done
+        printf '待上传：%s\n' "${raw[@]##*/}"
 
-        notes="$RUNNER_TEMP/rolling-release-notes.md"
+        notes="$(topath "$RUNNER_TEMP/rolling-release-notes.md")"
         printf '%s\n' \
           '由 `build-ffmpeg.yml` 自动维护的滚动发布：每次成功构建按固定文件名覆盖同名资产。' \
           '' \
@@ -28,7 +40,7 @@ runs:
           '包内布局统一为：单一顶层目录 `ffmpeg-<ref>-<platform>-<variant>[-shared]/`，' \
           '其下有 `bin/`（可执行文件与全部运行时库）、`LICENSE.txt`、`README-build.txt`。' \
           '具体 ref / commit / configure 参数见 `README-build.txt` 与 `ffmpeg -version` 输出。' \
-          > "$notes"
+          > "$RUNNER_TEMP/rolling-release-notes.md"
 
         gh release view "$RELEASE_TAG" --repo "$FFMPEG_REPO" >/dev/null 2>&1 || \
           gh release create "$RELEASE_TAG" --repo "$FFMPEG_REPO" --target "$GITHUB_SHA" \

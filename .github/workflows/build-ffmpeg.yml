@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - "**.md"
       - .gitignore
+      - .gitattributes
   workflow_dispatch:
     inputs:
       ffmpeg_ref:
@@ -26,14 +27,13 @@ env:
   RELEASE_TAG: latest
   FFMPEG_REPO: Aer-Light-Work/ffmpeg-build-flow
 
+# 注意：路径不在 job 级 env 里拼 ${{ runner.temp }} —— runner context 只允许出现在
+# step 级。各步骤直接从导出的 RUNNER_TEMP 环境变量取，publish action 用同一约定。
+
 jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 120
-    env:
-      WORK: ${{ runner.temp }}/work
-      OUT: ${{ runner.temp }}/out
-      FFMPEG_SRC: ${{ runner.temp }}/ffmpeg-src
     steps:
       - uses: actions/checkout@v4
 
@@ -52,15 +52,16 @@ jobs:
 
       - name: Build LGPL + GPL
         shell: msys2 {0}
+        env:
+          FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
         run: |
           set -euo pipefail
-          export FFMPEG_REF="${FFMPEG_REF_INPUT}"
+          export WORK="$RUNNER_TEMP/work" OUT="$RUNNER_TEMP/out" FFMPEG_SRC="$RUNNER_TEMP/ffmpeg-src"
+          mkdir -p "$WORK" "$OUT"
           for v in lgpl gpl; do
             echo "########## windows / $v ##########"
             VARIANT="$v" bash scripts/build-ffmpeg-msys2.sh
           done
-        env:
-          FFMPEG_REF_INPUT: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
 
       - uses: ./.github/actions/publish
         if: always()
@@ -68,11 +69,6 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 150
-    env:
-      WORK: ${{ runner.temp }}/work
-      OUT: ${{ runner.temp }}/out
-      FFMPEG_SRC: ${{ runner.temp }}/ffmpeg-src
-      PREFIX: ${{ runner.temp }}/deps
     steps:
       - uses: actions/checkout@v4
 
@@ -86,18 +82,22 @@ jobs:
       - name: Build static dependencies（一次，两变体共用）
         run: |
           set -euo pipefail
-          VARIANT=gpl OS=linux WORK="$WORK/deps-src" bash scripts/build-deps.sh
+          export WORK="$RUNNER_TEMP/work/deps-src" PREFIX="$RUNNER_TEMP/deps"
+          mkdir -p "$WORK" "$PREFIX"
+          VARIANT=gpl OS=linux bash scripts/build-deps.sh
 
       - name: Build LGPL + GPL
+        env:
+          FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
         run: |
           set -euo pipefail
-          export FFMPEG_REF="${FFMPEG_REF_INPUT}"
+          export WORK="$RUNNER_TEMP/work" OUT="$RUNNER_TEMP/out" \
+                 FFMPEG_SRC="$RUNNER_TEMP/ffmpeg-src" PREFIX="$RUNNER_TEMP/deps"
+          mkdir -p "$WORK" "$OUT"
           for v in lgpl gpl; do
             echo "########## linux / $v ##########"
             VARIANT="$v" OS=linux bash scripts/build-ffmpeg.sh
           done
-        env:
-          FFMPEG_REF_INPUT: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
 
       - uses: ./.github/actions/publish
         if: always()
@@ -105,11 +105,6 @@ jobs:
   build-macos:
     runs-on: macos-latest  # arm64
     timeout-minutes: 150
-    env:
-      WORK: ${{ runner.temp }}/work
-      OUT: ${{ runner.temp }}/out
-      FFMPEG_SRC: ${{ runner.temp }}/ffmpeg-src
-      PREFIX: ${{ runner.temp }}/deps
     steps:
       - uses: actions/checkout@v4
 
@@ -121,18 +116,22 @@ jobs:
       - name: Build static dependencies（一次，两变体共用）
         run: |
           set -euo pipefail
-          VARIANT=gpl OS=macos WORK="$WORK/deps-src" bash scripts/build-deps.sh
+          export WORK="$RUNNER_TEMP/work/deps-src" PREFIX="$RUNNER_TEMP/deps"
+          mkdir -p "$WORK" "$PREFIX"
+          VARIANT=gpl OS=macos bash scripts/build-deps.sh
 
       - name: Build LGPL + GPL
+        env:
+          FFMPEG_REF: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
         run: |
           set -euo pipefail
-          export FFMPEG_REF="${FFMPEG_REF_INPUT}"
+          export WORK="$RUNNER_TEMP/work" OUT="$RUNNER_TEMP/out" \
+                 FFMPEG_SRC="$RUNNER_TEMP/ffmpeg-src" PREFIX="$RUNNER_TEMP/deps"
+          mkdir -p "$WORK" "$OUT"
           for v in lgpl gpl; do
             echo "########## macos-arm64 / $v ##########"
             VARIANT="$v" OS=macos bash scripts/build-ffmpeg.sh
           done
-        env:
-          FFMPEG_REF_INPUT: ${{ github.event.inputs.ffmpeg_ref || 'n7.1' }}
 
       - uses: ./.github/actions/publish
         if: always()
