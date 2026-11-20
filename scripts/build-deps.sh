@@ -54,7 +54,10 @@ ensure_cmake3() {
   local dest="${WORK:?ensure_cmake3 需要 WORK}/cmake3"
   local cached
   # 目录尚不存在时 find 返回 1，叠加 pipefail 会让这条赋值触发 set -e 退出，故显式吞掉。
-  cached="$( { find "$dest" -maxdepth 3 -type f \( -name cmake -o -name cmake.exe \) -print 2>/dev/null || true; } | head -1)"
+  # 深度必须够：macos-universal 归档解出来是 CMake.app/Contents/bin/cmake（相对 dest 第 4 层），
+  # 而 windows 是 <dir>/bin/cmake.exe、linux 是 bin/cmake。上一轮 -maxdepth 3 让 linux 与
+  # windows 都侥幸通过，只有 macOS 报 “解压后找不到 cmake 可执行文件（CMake.app）”。
+  cached="$( { find "$dest" -maxdepth 6 -type f \( -path '*/bin/cmake' -o -path '*/bin/cmake.exe' \) -print 2>/dev/null || true; } | head -1)"
   if [ -n "$cached" ]; then
     export PATH="$(dirname "$cached"):$PATH"
     echo "复用已引导的 cmake -> $(cmake --version | head -1)"
@@ -74,8 +77,10 @@ ensure_cmake3() {
       tar -xf "$dest/cmake.tar.gz" -C "$dest" --strip-components=1 ;;
   esac
   rm -f "$dest"/cmake.*
-  # 各平台归档层级不同（Windows 是 bin/cmake.exe），搜出可执行文件再取其目录。
-  local b; b="$( { find "$dest" -maxdepth 3 -type f \( -name cmake -o -name cmake.exe \) -print 2>/dev/null || true; } | head -1)"
+  # 三平台归档层级不同，且归档里另有同名非可执行文件（macOS 的
+  # Contents/share/bash-completion/completions/cmake，以及 bin/cmake-gui），
+  # 所以必须同时限定 */bin/ 与精确文件名，不能只 -name cmake 再取 head -1。
+  local b; b="$( { find "$dest" -maxdepth 6 -type f \( -path '*/bin/cmake' -o -path '*/bin/cmake.exe' \) -print 2>/dev/null || true; } | head -1)"
   [ -n "$b" ] || deps_die "ensure_cmake3: 解压后找不到 cmake 可执行文件（$(ls "$dest")）"
   export PATH="$(dirname "$b"):$PATH"
   local v; v="$(cmake --version | head -1)"
@@ -114,8 +119,16 @@ build_x265() {
 
   ensure_cmake3
   # 只使用已在 $X265_REF 的 source/CMakeLists.txt 里核实存在的变量：
-  # ENABLE_SHARED / ENABLE_PIC / ENABLE_CLI / EXTRA_LIB / EXTRA_LINK_FLAGS。
+  # ENABLE_SHARED / ENABLE_PIC / ENABLE_CLI / EXTRA_LINK_FLAGS。
   # 注意 3.x/4.x 都没有 ENABLE_STATIC —— x265-static 是无条件 add_library + install 的。
+  #
+  # 不要传 -DEXTRA_LIB=...：x265 的 encoder/CMakeLists.txt 有
+  #   if(EXTRA_LIB) … set_source_files_properties(api.cpp PROPERTIES COMPILE_FLAGS ${APIFLAGSTR})
+  # 而 APIFLAGSTR 只在 LINKED_8/10/12BIT 时才非空。我们不做多位深构建，于是 EXTRA_LIB 一旦
+  # 非空，该命令就只有 3 个参数 → “set_source_files_properties called with incorrect number
+  # of arguments”，configure 直接失败（Linux GPL 实测就是这样挂的，Windows/macOS 没传所以过）。
+  # 静态库本身也不需要 EXTRA_LIB：-ldl/-lstdc++ 这类由 x265.pc 的 Libs.private 经
+  # --pkg-config-flags=--static 交给 FFmpeg，不是在这里补。
   local -a args=(
     -DCMAKE_BUILD_TYPE=Release
     -DCMAKE_INSTALL_PREFIX="$PREFIX"
@@ -125,7 +138,6 @@ build_x265() {
     -DEXTRA_LINK_FLAGS=
   )
   case "$os" in
-    linux)        args+=(-DEXTRA_LIB=dl) ;;
     windows|msys) args+=(-G "MSYS Makefiles") ;;
   esac
   ( cd "$WORK/x265/source"
