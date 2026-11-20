@@ -47,13 +47,11 @@ ARGS=(
   --extra-ldflags="-L$PREFIX/lib"
 )
 if [ "$VARIANT" = gpl ]; then
-  ARGS+=(
-    --enable-gpl --enable-version3
-    --enable-libx264 --enable-libx265
-    --enable-libvpx --enable-libopus --enable-libvorbis --enable-libdav1d
-  )
+  # GPL = LGPL 的同一套源码与依赖（只 lame），外加许可开关：启用 libpostproc 等
+  # GPL 原生组件。故意不含 x264/x265 —— 消费侧只提取音频，视频依赖链曾反复翻车且无人使用。
+  ARGS+=(--enable-gpl --enable-version3)
 fi
-# 静态链 x265/vorbis 时它们自身的系统依赖需要手工补齐。
+# linux 静态构建常见的系统库依赖（原生代码本身也会用到）。
 if [ "$OS" = linux ]; then
   ARGS+=(--extra-libs="-lpthread -lm -ldl")
 else
@@ -65,11 +63,7 @@ export PATH="$PREFIX/bin:$PATH"
 
 CONFIGURE_ARGS="${ARGS[*]}"
 export CONFIGURE_ARGS
-if [ "$VARIANT" = gpl ]; then
-  DEPS_NOTE="lame(static) x264(static) x265(static) libvpx(static) opus(static) ogg/vorbis(static) dav1d(static)"
-else
-  DEPS_NOTE="lame(static)"
-fi
+DEPS_NOTE="lame(static)"
 export DEPS_NOTE
 
 echo "=== configure（${PLATFORM} / ${VARIANT}）==="

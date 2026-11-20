@@ -31,9 +31,8 @@ env:
 # 各步骤从 shell 本就导出的 RUNNER_TEMP 取路径，publish action 用同一约定。
 
 jobs:
-  # 平台 × 变体 = 6 个 job。不合并成 3 个平台 job 的原因：上一轮 Linux 先把全部 GPL 依赖
-  # 编完才轮到 ffmpeg，x265 一挂连 LGPL 的机会都没有。拆开以后 LGPL 只编 lame、几分钟
-  # 出结果，GPL 的依赖链再长也不会拖累它。
+  # 平台 × 变体 = 6 个 job（fail-fast: false）。拆到变体粒度是为了失败隔离：
+  # 曾有过 GPL 依赖一挂、同 job 里本可成功的 LGPL 也被连坐的教训。
   build:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
@@ -43,8 +42,10 @@ jobs:
         include:
           - { os: windows-latest, variant: lgpl }
           - { os: windows-latest, variant: gpl }
-          - { os: ubuntu-latest,  variant: lgpl }
-          - { os: ubuntu-latest,  variant: gpl }
+          # Linux 基线取受支持的最老 Ubuntu，保证产物在 glibc 2.35+ 发行版可运行
+          # （ubuntu-latest=24.04 的 glibc 2.39 会把老发行版排除在外）。
+          - { os: ubuntu-22.04,   variant: lgpl }
+          - { os: ubuntu-22.04,   variant: gpl }
           - { os: macos-latest,   variant: lgpl }   # macos-latest 即 arm64
           - { os: macos-latest,   variant: gpl }
     steps:
@@ -55,40 +56,34 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          # 故意不装 mingw-w64-x86_64-x265：它是 4.3，与 FFmpeg n7.1 的 libx265 wrapper
-          # 的 encoder_encode 签名不兼容；x265 由 scripts/build-deps.sh 自建 Release_4.0。
-          # zip 用于打包，unzip/tar/curl 供 ensure_cmake3 取 CMake 归档。
+          # 依赖只有 lame。不要加 mingw-w64-x86_64-x265 等视频库：MSYS2 的 x265 是 4.3，
+          # 与 FFmpeg n7.1 的 libx265 wrapper 签名不兼容；且消费侧只提取音频。
+          # zip 用于打包，unzip/curl 供脚本取源。
           install: >-
-            nasm yasm pkg-config zip unzip curl git make
+            nasm pkg-config zip unzip curl git make
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-lame
-            mingw-w64-x86_64-x264
-            mingw-w64-x86_64-libvpx mingw-w64-x86_64-opus
-            mingw-w64-x86_64-libvorbis mingw-w64-x86_64-dav1d
-            mingw-w64-x86_64-zlib mingw-w64-x86_64-bzip2
 
       - name: Install toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            nasm yasm pkg-config autoconf automake libtool meson ninja-build \
-            cmake git build-essential xz-utils
+            nasm pkg-config git build-essential xz-utils curl ca-certificates
 
       - name: Install toolchain (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install nasm yasm pkg-config autoconf automake libtool \
-            meson ninja cmake git xz
+          brew install nasm pkg-config git xz
 
-      # Linux/macOS：静态依赖装进独立 PREFIX。LGPL job 只会取 lame，GPL job 才走完整链。
+      # Linux/macOS：依赖只有 lame，静态装进独立 PREFIX；两变体共用同一套。
       - name: Build static dependencies
         if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           export WORK="$RUNNER_TEMP/work/deps-src" PREFIX="$RUNNER_TEMP/deps"
           mkdir -p "$WORK" "$PREFIX"
-          VARIANT="${{ matrix.variant }}" OS="$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')" \
+          OS="$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')" \
             bash scripts/build-deps.sh
 
       - name: Build FFmpeg (Windows)

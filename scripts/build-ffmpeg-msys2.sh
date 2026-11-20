@@ -12,32 +12,14 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/finalize.sh
 . "$HERE/finalize.sh"
-# shellcheck source=scripts/build-deps.sh
-. "$HERE/build-deps.sh"   # 只借用 build_x265 / ensure_cmake3 / fetch / unpack
 
 : "${FFMPEG_REF:?需要 FFMPEG_REF}"
 : "${VARIANT:?需要 VARIANT}"
 : "${FFMPEG_SRC:?需要 FFMPEG_SRC}"
 : "${OUT:?需要 OUT}"
 WORK="${WORK:-$PWD/work}"
-OS=windows
-PREFIX="${PREFIX:-$WORK/deps-x265}"
 PLATFORM="win64"
 [ "$VARIANT" = lgpl ] || [ "$VARIANT" = gpl ] || die "不支持的变体：${VARIANT}"
-
-# x265 不能用 MSYS2 的包：它是 4.3，而 FFmpeg n7.1 的 libx265.c 按 3.x 的
-# encoder_encode 签名写（实测多出一个 x265_picture ** 参数而编译失败）。
-# 其余依赖（lame/x264/libvpx/opus/vorbis/dav1d）与 n7.1 相容，继续用 MSYS2 包。
-if [ "$VARIANT" = gpl ]; then
-  if [ -f "$PREFIX/lib/libx265.a" ]; then
-    echo "复用已构建的 x265：$PREFIX"
-  else
-    mkdir -p "$PREFIX"
-    JOBS="$(nproc 2>/dev/null || echo 4)"
-    build_x265 windows
-  fi
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-fi
 
 ensure_src
 
@@ -53,28 +35,15 @@ ARGS=(
   --enable-libmp3lame
 )
 if [ "$VARIANT" = gpl ]; then
-  ARGS+=(
-    --enable-gpl --enable-version3
-    --enable-libx264 --enable-libx265
-    --enable-libvpx --enable-libopus --enable-libvorbis --enable-libdav1d
-    # 自建的 x265 只有静态库（ENABLE_SHARED=0），它的 x265.pc 里
-    #   Libs.private: -lstdc++ -lgcc_s -lgcc -liconv ...
-    # 不加 --static 时 pkg-config 只给 -lx265，把这些私有依赖漏掉，把 libx265.a 链进
-    # avcodec-61.dll 时会留下未定义符号。用 --static 是为了让 .pc 自己声明清单，
-    # 而不是我在这里硬抄一遍（硬抄会随 x265 版本漂移）。
-    # 只加在 GPL 分支：LGPL 唯一的依赖是 MSYS2 的共享 lame，它根本不走 pkg-config，
-    # 且上一轮 LGPL 已在无此参数的情况下构建成功，不必扰动。
-    --pkg-config-flags=--static
-  )
+  # GPL = LGPL 的同一套源码与依赖（只 lame），外加许可开关：启用 libpostproc 等
+  # GPL 原生组件。故意不含 x264/x265 —— 消费侧只提取音频；且 MSYS2 的 x265 已是 4.3，
+  # 与 FFmpeg n7.1 的 libx265 wrapper 签名不兼容（实测 encoder_encode 第 5 参类型不符）。
+  ARGS+=(--enable-gpl --enable-version3)
 fi
 
 CONFIGURE_ARGS="${ARGS[*]}"
 export CONFIGURE_ARGS
-if [ "$VARIANT" = gpl ]; then
-  DEPS_NOTE="MSYS2 mingw-w64-x86_64: lame x264 libvpx opus libvorbis dav1d zlib bzip2（共享 DLL，已全部收进 bin/）+ x265 Release_4.0 自建静态库（MSYS2 的 4.3 与 FFmpeg n7.1 的 encoder_encode 签名不兼容）"
-else
-  DEPS_NOTE="MSYS2 mingw-w64-x86_64: lame（共享 DLL，运行时依赖已全部收进 bin/）"
-fi
+DEPS_NOTE="MSYS2 mingw-w64-x86_64: lame（共享 DLL，运行时依赖已全部收进 bin/）"
 export DEPS_NOTE
 
 echo "=== configure（${PLATFORM} / ${VARIANT}）==="

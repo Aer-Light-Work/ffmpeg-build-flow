@@ -56,14 +56,10 @@ selfcheck_ffmpeg() {
   fi
 
   # aac/flac 是 ffmpeg 原生编码器，libmp3lame 来自 lame —— 消费侧只依赖这三个。
+  # 两个变体要求相同：GPL 变体是音频范围构建，不含 x264/x265（见构建脚本注释）。
   for c in aac flac libmp3lame; do
     has "$c" || die "自检失败：缺少编码器 $c"
   done
-  if [ "$variant" = gpl ]; then
-    for c in libx264 libx265; do
-      has "$c" || die "自检失败：GPL 产物缺少编码器 $c"
-    done
-  fi
   echo "自检通过（${variant}）"
 }
 

@@ -12,6 +12,8 @@
   破坏其中任一条都属于破坏性变更。
 - LGPL 变体的 configure 里绝不能出现 `--enable-gpl` / `--enable-nonfree`：
   `scripts/finalize.sh` 的 `selfcheck_ffmpeg` 会主动拦截，不要绕过它。
+- 两个变体的依赖都只有 lame；GPL 变体仅是多了 `--enable-gpl --enable-version3` 的
+  音频范围构建。不要往任一变体加 x264/x265 等视频库（消费侧用不到，且曾反复翻车）。
 - 本地复现构建：Windows 需在 MSYS2 MINGW64  shell 里跑
   `scripts/build-ffmpeg-msys2.sh`；Linux/macOS 先跑 `scripts/build-deps.sh`
   再跑 `scripts/build-ffmpeg.sh`，两个脚本都只读环境变量。
