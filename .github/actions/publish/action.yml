@@ -22,7 +22,8 @@ runs:
         raw=()
         for f in "$OUT"/ffmpeg-*.zip "$OUT"/ffmpeg-*.tar.xz; do raw+=("$f"); done
         if [ ${#raw[@]} -eq 0 ]; then
-          echo "::$error::$OUT 下没有任何压缩包"
+          # ::error:: 里的 $error 会被 bash 当变量展开，配合 set -u 会抛二次错误
+          echo '::error::'"$OUT"' 下没有任何压缩包'
           ls -la "$OUT" 2>&1 || true
           exit 1
         fi

@@ -25,21 +25,21 @@ fetch() { # fetch <dest> <url...>
   local dest="$1"; shift
   local u
   for u in "$@"; do
-    echo "  尝试 $u"
+    # 必须走 stderr：unpack 用 stdout 回传路径，任何进度文字都会污染返回值。
+    echo "  尝试 $u" >&2
     if curl -fsSL --retry 2 --connect-timeout 20 -o "$dest" "$u"; then return 0; fi
-    echo "  失败，换源"
+    echo "  失败，换源" >&2
   done
   return 1
 }
 
-unpack() { # unpack <name> <dest> <url...> -> 把唯一顶层目录路径写到 stdout
+unpack() { # unpack <name> <dest> <url...> -> 把解压后的目录路径写到 stdout
   local name="$1" dest="$2"; shift 2
   local arc="$WORK/$name.tar.gz"
   fetch "$arc" "$@" || { echo "build-deps: $name 所有源都失败" >&2; return 1; }
-  local dir="$WORK/$name"
-  rm -rf "$dir"; mkdir -p "$dir"
-  tar -xf "$arc" -C "$dir" --strip-components=1
-  printf '%s\n' "$dir"
+  rm -rf "$dest"; mkdir -p "$dest"
+  tar -xf "$arc" -C "$dest" --strip-components=1
+  printf '%s\n' "$dest"
 }
 
 autotools_static() { # autotools_static <dir> [额外 configure 参数...]
@@ -56,9 +56,6 @@ build_lame() {
   local dir; dir="$(unpack lame "$WORK/lame" \
     https://downloads.sourceforge.net/lame/lame-3.100.tar.gz \
     https://ftp.osuosl.org/pub/blfs/conglomeration/lame/lame-3.100.tar.gz)"
-  # lame 3.100 的 SSE 向量源文件漏了 xmmintrin.h，clang（macOS 默认）会直接编译失败。
-  local f="$dir/libmp3lame/vector/xmm_quantize_sub.c"
-  [ -f "$f" ] && ! grep -q 'xmmintrin.h' "$f" && sed -i.bak '1i #include <xmmintrin.h>' "$f"
   autotools_static "$dir" --disable-frontend
 }
 
