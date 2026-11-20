@@ -89,6 +89,10 @@ package() {
   if command -v strip >/dev/null 2>&1; then
     find "$DIR/bin" -maxdepth 1 -type f \( -name 'ffmpeg*' -o -name 'ffprobe*' -o -name '*.dll' -o -name '*.so*' \) \
       -exec strip --strip-unneeded {} + 2>/dev/null || echo "警告：strip 失败，保留未剥离二进制"
+    # strip 底层是 objcopy，它会在目标同目录建 st###### 形式的临时文件；失败时临时文件
+    # 不会被回收，于是被一起打进发布资产（本地用假二进制复现过：bin/st3cqBko 等）。
+    # 成功路径下不会有残留，所以这里无条件清一次。
+    find "$DIR/bin" -maxdepth 1 -type f -name 'st??????' -delete 2>/dev/null || true
   fi
 
   local lic_src
